@@ -1,0 +1,25 @@
+unit_tests:
+  - name: test_fct_virements_double_ecriture
+    description: >
+      Un virement exécuté produit deux legs : sortante (montant négatif,
+      compte source) et entrante (montant positif, compte destination),
+      converties en EUR au taux du jour. Un virement non exécuté est ignoré.
+    model: fct_virements
+    given:
+      - input: ref('stg_virements')
+        rows:
+          - {virement_id: 1, tenant_id: 1, compte_source_id: 10, compte_dest_id: 20,
+             montant: 100, devise: 'USD', date_virement: '2024-01-10 12:00:00',
+             statut: 'execute', _loaded_at: '2024-01-10 13:00:00'}
+          - {virement_id: 2, tenant_id: 1, compte_source_id: 10, compte_dest_id: 20,
+             montant: 50, devise: 'EUR', date_virement: '2024-01-10 12:00:00',
+             statut: 'rejete', _loaded_at: '2024-01-10 13:00:00'}
+      - input: ref('int_fx_rates_daily')
+        rows:
+          - {date_cotation: '2024-01-10', devise_cible: 'USD', taux: 1.25}
+    expect:
+      rows:
+        - {virement_id: 1, virement_leg: 'sortant', compte_id: 10, contrepartie_compte_id: 20,
+           montant_signe: -100, montant_eur: 80, montant_signe_eur: -80}
+        - {virement_id: 1, virement_leg: 'entrant', compte_id: 20, contrepartie_compte_id: 10,
+           montant_signe: 100, montant_eur: 80, montant_signe_eur: 80}

@@ -1,0 +1,29 @@
+unit_tests:
+  - name: test_stg_transactions_merge_statut
+    description: >
+      En incrémental, une transaction déjà présente en en_attente et rechargée
+      en validee (nouveau _loaded_at) doit ressortir une seule fois, avec la
+      version la plus récente. Une ligne hors fenêtre de lookback est ignorée.
+    model: stg_transactions
+    overrides:
+      macros:
+        is_incremental: true
+      vars:
+        incremental_lookback_days: 7
+    given:
+      - input: source('fintrack_raw', 'raw_transactions')
+        rows:
+          # ancienne version (déjà chargée) et nouvelle version de T1
+          - {transaction_id: 1, statut: 'en_attente', type_operation: 'debit', montant: 10,
+             is_test: false, _loaded_at: '2025-01-31 10:00:00', updated_at: '2025-01-31 10:00:00'}
+          - {transaction_id: 1, statut: 'validee', type_operation: 'debit', montant: 10,
+             is_test: false, _loaded_at: '2025-02-01 10:00:00', updated_at: '2025-02-01 09:59:00'}
+          # chargée il y a plus de 7 jours avant le max de la cible : hors fenêtre
+          - {transaction_id: 2, statut: 'validee', type_operation: 'credit', montant: 5,
+             is_test: false, _loaded_at: '2025-01-01 10:00:00', updated_at: '2025-01-01 10:00:00'}
+      - input: this
+        rows:
+          - {transaction_id: 1, statut: 'en_attente', _loaded_at: '2025-01-31 10:00:00'}
+    expect:
+      rows:
+        - {transaction_id: 1, statut: 'validee', montant_signe: -10}

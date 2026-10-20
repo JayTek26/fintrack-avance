@@ -1,0 +1,172 @@
+# ============================================================
+# dbt Slim CI — FinTrack Perf & Scale
+# ============================================================
+# - pull_request : ne reconstruit que les modèles modifiés et leur aval
+#   (state:modified+), le reste est lu en prod via --defer. Chaque PR a son
+#   schéma isolé FINTRACK_DEV.CI_<PR_ID>, supprimé en fin de job.
+# - push sur main : publie le manifest de prod (artefact `prod-manifest`)
+#   qui sert d'état de référence aux PR suivantes.
+#
+# Secrets GitHub à configurer (Settings → Secrets and variables → Actions) :
+#   SNOWFLAKE_ACCOUNT        ex. xy12345.eu-west-1
+#   SNOWFLAKE_CI_USER        utilisateur technique CI (rôle FINTRACK_DEV_ROLE)
+#   SNOWFLAKE_CI_PASSWORD
+#   SNOWFLAKE_PROD_USER      utilisé uniquement pour rendre le profil prod au
+#                            `dbt parse` (aucune connexion n'est ouverte)
+# ============================================================
+
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [main, staging]
+    paths:
+      - "dbt/**"
+      - ".github/workflows/dbt_ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "dbt/**"
+  workflow_dispatch:
+
+concurrency:
+  group: dbt-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DBT_PROFILES_DIR: ${{ github.workspace }}/dbt/ci_profiles
+  SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+  DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+  PYTHON_VERSION: "3.11"
+  # dbt-core >= 1.10.5 : syntaxe `arguments:` des tests génériques
+  DBT_PACKAGES: "dbt-core~=1.10.5 dbt-snowflake~=1.10.0"
+
+jobs:
+  # ----------------------------------------------------------
+  # PR : Slim CI
+  # ----------------------------------------------------------
+  slim-ci:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      DBT_CI_PR_ID: ${{ github.event.pull_request.number }}
+      SNOWFLAKE_CI_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
+      SNOWFLAKE_CI_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
+    defaults:
+      run:
+        working-directory: dbt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Installer dbt
+        run: pip install ${{ env.DBT_PACKAGES }}
+
+      - name: Profil CI
+        run: |
+          mkdir -p ci_profiles
+          cp profiles.yml.example ci_profiles/profiles.yml
+
+      - name: Récupérer le manifest de prod
+        id: prod_state
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: dbt_ci.yml
+          branch: main
+          name: prod-manifest
+          path: prod-artifacts
+          if_no_artifact_found: warn
+
+      - name: dbt deps
+        run: dbt deps
+
+      - name: dbt debug
+        run: dbt debug --target ci
+
+      # L'artefact est téléchargé dans <repo>/prod-artifacts (= ../prod-artifacts
+      # depuis dbt/ : `path` est relatif au workspace, pas au working-directory)
+      - name: Vérifier l'état de prod
+        run: |
+          if [ -f ../prod-artifacts/manifest.json ]; then
+            echo "has_state=true" >> "$GITHUB_ENV"
+          else
+            echo "::warning::Pas de manifest de prod : build complet (premier run)."
+            echo "has_state=false" >> "$GITHUB_ENV"
+          fi
+
+      # Les tests unitaires ont besoin que les relations des modèles testés
+      # existent : on les crée vides (--empty), puis on construit en
+      # --full-refresh (sinon les incrémentaux, créés vides, ne chargeraient
+      # rien). Les sources lourdes sont limitées au dernier mois en CI
+      # (cf. stg_transactions, var ci_lookback_days).
+      - name: dbt build (Slim CI)
+        run: |
+          if [ "$has_state" = "true" ]; then
+            SELECTION=(--select "state:modified+" --defer --state ../prod-artifacts)
+          else
+            SELECTION=()
+          fi
+          dbt run   --target ci --empty        "${SELECTION[@]}" --exclude tag:experimental
+          dbt build --target ci --full-refresh "${SELECTION[@]}" --exclude tag:experimental \
+            --vars '{tests_complets: true}'
+
+      - name: Publier les résultats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-ci-artifacts-pr-${{ github.event.pull_request.number }}
+          path: |
+            dbt/target/run_results.json
+            dbt/target/manifest.json
+          retention-days: 7
+
+      - name: Cleanup du schéma CI
+        if: always()
+        run: dbt run-operation drop_ci_schema --target ci
+
+  # ----------------------------------------------------------
+  # main : publication de l'état de prod
+  # ----------------------------------------------------------
+  publish-prod-manifest:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SNOWFLAKE_PROD_USER: ${{ secrets.SNOWFLAKE_PROD_USER }}
+      SNOWFLAKE_PRIVATE_KEY_PATH: /tmp/unused.p8
+    defaults:
+      run:
+        working-directory: dbt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Installer dbt
+        run: pip install ${{ env.DBT_PACKAGES }}
+
+      - name: Profil
+        run: |
+          mkdir -p ci_profiles
+          cp profiles.yml.example ci_profiles/profiles.yml
+
+      - name: dbt deps + parse (target prod)
+        run: |
+          dbt deps
+          dbt parse --target prod
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prod-manifest
+          path: dbt/target/manifest.json
+          retention-days: 90

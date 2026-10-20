@@ -1,0 +1,91 @@
+version: 2
+
+sources:
+  - name: fintrack_raw
+    # En dev, les sources lisent un clone zero-copy de FINTRACK_PROD.RAW
+    # (FINTRACK_DEV.DEV_<USER>_RAW) : on peut y simuler des mises à jour
+    # (changements de statut, KYC…) sans toucher à la prod.
+    # Surchargeable : --vars '{raw_database: FINTRACK_PROD, raw_schema: RAW}'
+    database: "{{ var('raw_database', 'FINTRACK_DEV' if target.name == 'dev' else 'FINTRACK_PROD') }}"
+    schema: "{{ var('raw_schema', target.schema ~ '_RAW' if target.name == 'dev' else 'RAW') }}"
+    description: "Données brutes chargées depuis le core banking system"
+    config:
+      loaded_at_field: _loaded_at
+      freshness:
+        warn_after: {count: 6, period: hour}
+        error_after: {count: 24, period: hour}
+    tables:
+      - name: raw_tenants
+        description: "Banques partenaires de la plateforme B2B2C"
+
+      - name: raw_categories
+        description: "Référentiel des catégories de transactions (hiérarchique)"
+
+      - name: raw_fx_rates
+        description: "Taux de change quotidiens historisés — base EUR"
+        columns:
+          - name: fx_id
+            data_tests: [unique, not_null]
+          - name: date_cotation
+            data_tests: [not_null]
+
+      - name: raw_comptes
+        description: "Comptes clients avec KYC/AML et données PII"
+        config:
+          loaded_at_field: _loaded_at
+          freshness:
+            warn_after: {count: 12, period: hour}
+            error_after: {count: 48, period: hour}
+        columns:
+          - name: compte_id
+            data_tests: [unique, not_null]
+
+      - name: raw_transactions
+        description: "Table de faits large — 80 colonnes, jusqu'à 100M lignes"
+        config:
+          loaded_at_field: _loaded_at
+          freshness:
+            warn_after: {count: 2, period: hour}
+            error_after: {count: 6, period: hour}
+        columns:
+          - name: transaction_id
+            data_tests:
+              - unique:
+                  config:
+                    where: "__fenetre_incrementale__"
+              - not_null:
+                  config:
+                    where: "__fenetre_incrementale__"
+          - name: tenant_id
+            data_tests:
+              - not_null:
+                  config:
+                    where: "__fenetre_incrementale__"
+              - relationships:
+                  arguments:
+                    to: source('fintrack_raw', 'raw_tenants')
+                    field: tenant_id
+                  config:
+                    where: "__fenetre_incrementale__"
+
+      - name: raw_virements
+        description: "Virements internes entre comptes"
+        config:
+          loaded_at_field: _loaded_at
+        columns:
+          - name: virement_id
+            data_tests: [unique, not_null]
+
+      - name: raw_titulaires
+        description: "Personnes physiques titulaires de comptes"
+        columns:
+          - name: titulaire_id
+            data_tests: [unique, not_null]
+
+      - name: raw_compte_titulaires
+        description: "Lien compte-titulaire avec part et période de validité"
+        columns:
+          - name: compte_id
+            data_tests: [not_null]
+          - name: titulaire_id
+            data_tests: [not_null]

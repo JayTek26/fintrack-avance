@@ -1,0 +1,53 @@
+# ============================================================
+# À copier vers ~/.dbt/profiles.yml
+# ============================================================
+
+fintrack_perf_scale:
+  target: dev
+  outputs:
+
+    # -----------------------------------------
+    # DEV — développement local
+    # -----------------------------------------
+    dev:
+      type: snowflake
+      account:    "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user:       "{{ env_var('SNOWFLAKE_USER') }}"
+      password:   "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      role:       FINTRACK_DEV_ROLE
+      warehouse:  WH_DEV
+      database:   FINTRACK_DEV
+      schema:     "DEV_{{ env_var('USER', 'unknown') | upper }}"
+      threads:    4
+      client_session_keep_alive: false
+      query_tag: 'target=dev'
+
+    # -----------------------------------------
+    # CI — exécuté par GitHub Actions sur les PRs
+    # -----------------------------------------
+    ci:
+      type: snowflake
+      account:    "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user:       "{{ env_var('SNOWFLAKE_CI_USER') }}"
+      password:   "{{ env_var('SNOWFLAKE_CI_PASSWORD') }}"
+      role:       FINTRACK_DEV_ROLE
+      warehouse:  WH_DEV
+      database:   FINTRACK_DEV
+      schema:     "CI_{{ env_var('DBT_CI_PR_ID', 'unknown') }}"
+      threads:    8
+      query_tag: 'target=ci'
+
+    # -----------------------------------------
+    # PROD — orchestré par Airflow / dbt Cloud
+    # -----------------------------------------
+    prod:
+      type: snowflake
+      account:    "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user:       "{{ env_var('SNOWFLAKE_PROD_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role:       FINTRACK_TRANSFORM_ROLE
+      warehouse:  WH_TRANSFORM
+      database:   FINTRACK_PROD
+      schema:     STAGING
+      threads:    12
+      query_tag: 'target=prod'

@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]   # tags Jinja dans les yml dbt
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+        exclude: ^docs/elementary/
+
+  - repo: https://github.com/sqlfluff/sqlfluff
+    rev: 3.0.7
+    hooks:
+      - id: sqlfluff-lint
+        files: ^dbt/(models|macros|tests|snapshots)/.*\.sql$
+        args: [--config, .sqlfluff]

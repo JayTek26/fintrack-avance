@@ -1,0 +1,41 @@
+version: 2
+
+# Consommateurs des modèles publics : dbt les relie au lineage, et la CI
+# (state:modified+) montre quels usages une PR impacte.
+exposures:
+  - name: metabase_dashboard_tenants
+    label: Dashboard tenants (Metabase)
+    type: dashboard
+    maturity: high
+    description: "Volumes, revenus et alertes compliance par banque partenaire"
+    depends_on:
+      - ref('fct_transactions', v=1)
+      - ref('mart_tenant_kpis_daily')
+      - ref('dim_tenants')
+    owner:
+      name: Data Platform Team
+      email: data-platform@fintrack.example
+
+  - name: metabase_rapprochement_finance
+    label: Rapprochement bancaire (Metabase)
+    type: dashboard
+    maturity: medium
+    description: "Suivi des lots non rapprochés > 3 jours pour l'équipe finance"
+    depends_on:
+      - ref('mart_reconciliation')
+      - ref('mart_solde_journalier')
+    owner:
+      name: Data Platform Team
+      email: data-platform@fintrack.example
+
+  - name: hightouch_crm_sync
+    label: Sync CRM (Hightouch)
+    type: application
+    maturity: high
+    description: "Reverse ETL des comptes et de leur activité vers le CRM des tenants"
+    depends_on:
+      - ref('dim_comptes')
+      - ref('fct_transactions', v=1)
+    owner:
+      name: Data Platform Team
+      email: data-platform@fintrack.example
