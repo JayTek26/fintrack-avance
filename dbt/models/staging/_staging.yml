@@ -1,0 +1,100 @@
+version: 2
+
+models:
+  - name: stg_tenants
+    description: "Tenants (banques partenaires) nettoyés"
+    columns:
+      - name: tenant_id
+        data_tests: [unique, not_null]
+
+  - name: stg_categories
+    description: "Référentiel catégories — actives uniquement"
+    columns:
+      - name: categorie_id
+        data_tests: [unique, not_null]
+
+  - name: stg_fx_rates
+    description: "Taux FX quotidiens"
+    columns:
+      - name: fx_id
+        data_tests: [unique, not_null]
+
+  - name: stg_comptes
+    description: "Comptes clients avec typage et normalisation"
+    columns:
+      - name: compte_id
+        data_tests: [unique, not_null]
+      - name: tenant_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_tenants')
+                field: tenant_id
+
+  - name: stg_transactions
+    description: "Transactions typées, incremental merge"
+    columns:
+      - name: transaction_id
+        data_tests:
+          - unique:
+              config:
+                where: "__fenetre_incrementale__"
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+
+  - name: stg_virements
+    description: "Virements internes typés, incremental merge"
+    columns:
+      - name: virement_id
+        data_tests: [unique, not_null]
+
+  - name: stg_titulaires
+    description: "Titulaires (personnes physiques) de comptes, typés et normalisés"
+    columns:
+      - name: titulaire_id
+        data_tests: [unique, not_null]
+      - name: nom
+        data_tests: [not_null]
+      - name: prenom
+        data_tests: [not_null]
+      - name: pays_residence
+        data_tests: [not_null]
+
+  - name: stg_compte_titulaires
+    description: "Liens compte-titulaire avec part et période de validité (date_debut incluse, date_fin exclue)"
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [compte_id, titulaire_id, date_debut]
+    columns:
+      - name: compte_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_comptes')
+                field: compte_id
+      - name: titulaire_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_titulaires')
+                field: titulaire_id
+      - name: role_titulaire
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['PRINCIPAL', 'CO_TITULAIRE']
+      - name: part_pct
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 100
+      - name: date_debut
+        data_tests: [not_null]

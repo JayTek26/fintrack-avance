@@ -1,0 +1,48 @@
+unit_tests:
+  - name: test_montant_signe_credit
+    description: "Un CREDIT doit produire un montant_signe positif"
+    model: stg_transactions
+    given:
+      - input: source('fintrack_raw', 'raw_transactions')
+        rows:
+          - {transaction_id: 1, tenant_id: 1, compte_id: 100,
+             montant: 500.00, type_operation: 'credit',
+             date_transaction: '2024-01-01 09:00:00',
+             statut: 'validee', is_test: false, devise: 'EUR',
+             montant_eur: 500.00}
+    expect:
+      rows:
+        - {transaction_id: 1, montant_signe: 500.00}
+
+  - name: test_montant_signe_debit
+    description: "Un DEBIT doit produire un montant_signe négatif"
+    model: stg_transactions
+    given:
+      - input: source('fintrack_raw', 'raw_transactions')
+        rows:
+          - {transaction_id: 2, tenant_id: 1, compte_id: 100,
+             montant: 250.00, type_operation: 'debit',
+             date_transaction: '2024-01-01 10:00:00',
+             statut: 'validee', is_test: false, devise: 'EUR',
+             montant_eur: 250.00}
+    expect:
+      rows:
+        - {transaction_id: 2, montant_signe: -250.00}
+
+  - name: test_transactions_test_exclues
+    description: "Les transactions is_test=true sont exclues du staging"
+    model: stg_transactions
+    given:
+      - input: source('fintrack_raw', 'raw_transactions')
+        rows:
+          - {transaction_id: 3, tenant_id: 1, compte_id: 100,
+             montant: 100.00, type_operation: 'credit',
+             date_transaction: '2024-01-01', statut: 'validee',
+             is_test: true, devise: 'EUR', montant_eur: 100.00}
+          - {transaction_id: 4, tenant_id: 1, compte_id: 100,
+             montant: 200.00, type_operation: 'credit',
+             date_transaction: '2024-01-01', statut: 'validee',
+             is_test: false, devise: 'EUR', montant_eur: 200.00}
+    expect:
+      rows:
+        - {transaction_id: 4, montant: 200.00}

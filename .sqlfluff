@@ -1,0 +1,20 @@
+[sqlfluff]
+dialect = snowflake
+# templater jinja (et non dbt) : le lint ne demande pas de connexion Snowflake
+templater = jinja
+max_line_length = 120
+exclude_rules = LT05, ST06, AM04, RF04
+large_file_skip_byte_limit = 50000
+
+[sqlfluff:templater:jinja]
+apply_dbt_builtins = True
+load_macros_from_path = dbt/macros
+
+[sqlfluff:indentation]
+tab_space_size = 4
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower

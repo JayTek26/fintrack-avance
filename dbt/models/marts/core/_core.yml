@@ -1,0 +1,382 @@
+version: 2
+
+models:
+  # ============================================
+  # DIMENSIONS
+  # ============================================
+  - name: dim_tenants
+    description: "Dimension des banques partenaires B2B2C"
+    columns:
+      - name: tenant_id
+        data_tests: [unique, not_null]
+      - name: tenant_code
+        data_tests: [unique, not_null]
+      - name: contract_tier
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['gold', 'silver', 'bronze']
+
+  - name: dim_comptes
+    description: "Dimension comptes — état courant"
+    columns:
+      - name: compte_id
+        data_tests: [unique, not_null]
+      - name: tenant_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_tenants')
+                field: tenant_id
+      - name: statut
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['actif', 'inactif', 'cloture', 'suspendu']
+      - name: kyc_level
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['basic', 'intermediate', 'advanced', 'not_verified']
+
+  - name: dim_comptes_scd2
+    description: |
+      Dimension comptes historisée (SCD Type 2) — piste d'audit KYC / statut / AML.
+      Contrainte "une seule version courante par compte" : test
+      assert_scd2_une_version_courante.
+    columns:
+      - name: compte_version_key
+        description: "Clé de substitution de la version (compte_id, date_debut_validite)"
+        data_tests: [unique, not_null]
+      - name: compte_id
+        data_tests: [not_null]
+      - name: date_debut_validite
+        data_tests: [not_null]
+      - name: is_current
+        data_tests: [not_null]
+      - name: version_number
+        data_tests: [not_null]
+
+  - name: dim_categories
+    description: "Dimension catégories avec hiérarchie résolue"
+    columns:
+      - name: categorie_id
+        data_tests: [unique, not_null]
+      - name: niveau
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+  - name: bridge_comptes_titulaires
+    description: "Bridge table pour les comptes joints (many-to-many)"
+    columns:
+      - name: bridge_key
+        data_tests: [unique, not_null]
+      - name: compte_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_comptes')
+                field: compte_id
+      - name: titulaire_id
+        data_tests: [not_null]
+      - name: allocation_factor
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: date_debut
+        data_tests: [not_null]
+      - name: is_primary
+        data_tests: [not_null]
+
+  # ============================================
+  # FAITS
+  # ============================================
+  - name: fct_transactions
+    description: |
+      Table de faits principale — 50-100M lignes.
+      Enrichie avec FX à date, catégorisation, compliance.
+      Modèle public : contrat enforcé, versionné (cf. docs/CONTRACTS.md).
+    latest_version: 1
+    config:
+      access: public
+      group: core
+      contract:
+        enforced: true
+    data_tests:
+      # Observabilité (US 6.3) : volume quotidien vs 60 jours d'historique.
+      # elementary_detection_delay_days décale la fenêtre de détection vers le
+      # passé : 0 en prod, ~655 jours pour le dataset synthétique (2023-2024).
+      - elementary.volume_anomalies:
+          arguments:
+            timestamp_column: date_transaction
+            time_bucket: {period: day, count: 1}
+            training_period: {period: day, count: 60}
+            detection_period: {period: day, count: 7}
+            detection_delay:
+              period: day
+              count: "{{ var('elementary_detection_delay_days', 0) | int }}"
+            anomaly_direction: both
+            anomaly_sensitivity: 3
+          config:
+            severity: warn
+            tags: ['elementary']
+    columns:
+      - name: transaction_id
+        description: "Identifiant unique de la transaction (clé du merge)"
+        data_type: number(18,0)
+        constraints:
+          - type: not_null
+            warn_unsupported: false
+          - type: primary_key
+            warn_unenforced: false
+            warn_unsupported: false
+        data_tests:
+          - unique:
+              config:
+                where: "__fenetre_incrementale__"
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+      - name: external_transaction_id
+        description: "Identifiant de la transaction côté core banking du tenant"
+        data_type: varchar
+      - name: tenant_id
+        description: "Banque partenaire"
+        data_type: number(38,0)
+        constraints:
+          - type: not_null
+            warn_unsupported: false
+        data_tests:
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+          - relationships:
+              arguments:
+                to: ref('dim_tenants')
+                field: tenant_id
+              config:
+                where: "__fenetre_incrementale__"
+      - name: compte_id
+        description: "Compte client"
+        data_type: number(38,0)
+        constraints:
+          - type: not_null
+            warn_unsupported: false
+        data_tests:
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+          - relationships:
+              arguments:
+                to: ref('dim_comptes')
+                field: compte_id
+              config:
+                where: "__fenetre_incrementale__"
+      - name: categorie_id
+        description: "Catégorie de la transaction"
+        data_type: number(38,0)
+      - name: date_transaction
+        description: "Horodatage de la transaction (event_time)"
+        data_type: timestamp_ntz
+        constraints:
+          - type: not_null
+            warn_unsupported: false
+        data_tests:
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+      - name: jour_transaction
+        description: "Jour de la transaction (clé de jointure FX)"
+        data_type: date
+      - name: semaine_transaction
+        description: "Lundi de la semaine de la transaction"
+        data_type: date
+      - name: mois_transaction
+        description: "Premier jour du mois de la transaction"
+        data_type: date
+      - name: date_valeur
+        description: "Date de valeur"
+        data_type: timestamp_ntz
+      - name: date_settlement
+        description: "Date de règlement"
+        data_type: timestamp_ntz
+      - name: montant
+        description: "Montant en devise d'origine (positif)"
+        data_type: number(15,2)
+      - name: devise
+        description: "Devise ISO 4217 d'origine"
+        data_type: varchar
+      - name: montant_eur
+        description: "Montant converti en EUR au taux du jour de la transaction (int_fx_rates_daily)"
+        data_type: number(18,2)
+        data_tests:
+          - not_null:
+              config:
+                where: "__fenetre_incrementale__"
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 100000000
+              config:
+                where: "__fenetre_incrementale__"
+                severity: warn
+      - name: montant_signe
+        description: "Montant signé en devise d'origine (crédit > 0, débit < 0)"
+        data_type: number(15,2)
+      - name: montant_signe_eur
+        description: "Montant signé en EUR"
+        data_type: number(18,2)
+      - name: frais
+        description: "Frais appliqués"
+        data_type: number(10,2)
+      - name: montant_net
+        description: "Montant net de frais"
+        data_type: number(15,2)
+      - name: type_operation
+        description: "credit / debit"
+        data_type: varchar
+      - name: sens
+        description: "entrant / sortant"
+        data_type: varchar
+      - name: statut
+        description: "validee / en_attente"
+        data_type: varchar
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['validee', 'en_attente']
+              config:
+                where: "__fenetre_incrementale__"
+      - name: moyen_paiement
+        description: "Moyen de paiement"
+        data_type: varchar
+      - name: canal
+        description: "Canal d'initiation"
+        data_type: varchar
+      - name: type_compte
+        description: "Type du compte"
+        data_type: varchar
+      - name: customer_segment
+        description: "Segment client"
+        data_type: varchar
+      - name: pays_compte
+        description: "Pays du compte"
+        data_type: varchar
+      - name: nom_categorie
+        description: "Libellé de la catégorie"
+        data_type: varchar
+      - name: type_categorie
+        description: "Type de catégorie"
+        data_type: varchar
+      - name: groupe
+        description: "Groupe de catégorie"
+        data_type: varchar
+      - name: marchand_nom
+        description: "Nom du marchand"
+        data_type: varchar
+      - name: marchand_categorie
+        description: "Catégorie du marchand"
+        data_type: varchar
+      - name: marchand_pays
+        description: "Pays du marchand (ISO 3166)"
+        data_type: varchar
+      - name: marchand_mcc
+        description: "Merchant Category Code"
+        data_type: number(38,0)
+      - name: aml_score
+        description: "Score AML"
+        data_type: number(6,2)
+      - name: aml_flag
+        description: "Statut AML"
+        data_type: varchar
+      - name: fraud_score
+        description: "Score de fraude"
+        data_type: number(6,2)
+      - name: is_flagged_for_review
+        description: "Transaction à revoir (AML)"
+        data_type: boolean
+      - name: is_reconciled
+        description: "Transaction rapprochée"
+        data_type: boolean
+      - name: reconciliation_batch_id
+        description: "Lot de rapprochement"
+        data_type: varchar
+      - name: source_system
+        description: "Système source"
+        data_type: varchar
+      - name: created_at
+        description: "Création dans le core banking"
+        data_type: timestamp_ntz
+      - name: updated_at
+        description: "Dernière mise à jour dans le core banking"
+        data_type: timestamp_ntz
+      - name: _loaded_at
+        description: "Horodatage de chargement dans RAW (watermark incrémental)"
+        data_type: timestamp_ntz
+    versions:
+      - v: 1
+        defined_in: fct_transactions
+        config:
+          # la v1 garde le nom de relation historique : pas de rebuild de la
+          # table incrémentale, aucun impact pour Metabase / Hightouch
+          alias: fct_transactions
+          # dbt Fusion créerait sinon une vue pointeur `fct_transactions`,
+          # en conflit avec l'alias ci-dessus
+          latest_version_pointer:
+            enabled: false
+      - v: 2
+        description: |
+          v2 (pré-release) : ajoute montant_hors_taxes_eur. Vue au-dessus de la v1,
+          pas de second stockage des 50-100M lignes. Deviendra latest_version
+          après la fenêtre de migration (cf. docs/CONTRACTS.md).
+        columns:
+          - include: all
+          - name: montant_hors_taxes_eur
+            description: >
+              Montant EUR hors TVA estimé : montant_eur / (1 + taux de TVA
+              standard du pays du marchand). NULL si la transaction n'a pas de
+              marchand (virement, prélèvement…). Hypothèse : taux standard, pas
+              de taux réduits par MCC.
+            data_type: number(18,2)
+          - name: taux_tva_applique
+            description: "Taux de TVA standard utilisé pour le calcul (NULL sans marchand)"
+            data_type: number(5,4)
+
+  - name: fct_virements
+    description: "Faits virements — double-écriture sortant/entrant"
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [virement_id, virement_leg]
+    columns:
+      - name: virement_id
+        data_tests: [not_null]
+      - name: virement_leg
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['sortant', 'entrant']
+      - name: tenant_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_tenants')
+                field: tenant_id
+      - name: compte_id
+        data_tests: [not_null]
+
+groups:
+  - name: core
+    owner:
+      name: Data Platform Team
+      email: data-platform@fintrack.example

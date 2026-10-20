@@ -1,0 +1,14 @@
+unit_tests:
+  - name: test_dim_categories_chemin_complet
+    model: dim_categories
+    given:
+      - input: ref('stg_categories')
+        rows:
+          - {categorie_id: 1, nom_categorie: 'Loisirs',    categorie_parent_id: null, type_categorie: 'depense', groupe: 'G1'}
+          - {categorie_id: 2, nom_categorie: 'Restaurant', categorie_parent_id: 1,    type_categorie: 'depense', groupe: 'G1'}
+          - {categorie_id: 3, nom_categorie: 'Fast-food',  categorie_parent_id: 2,    type_categorie: 'depense', groupe: 'G1'}
+    expect:
+      rows:
+        - {categorie_id: 1, niveau: 1, id_racine: 1, chemin_complet: 'Loisirs'}
+        - {categorie_id: 2, niveau: 2, id_racine: 1, chemin_complet: 'Loisirs > Restaurant'}
+        - {categorie_id: 3, niveau: 3, id_racine: 1, chemin_complet: 'Loisirs > Restaurant > Fast-food'}

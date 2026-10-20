@@ -1,0 +1,111 @@
+name: 'fintrack_perf_scale'
+version: '3.0.0'
+config-version: 2
+
+profile: 'fintrack_perf_scale'
+
+model-paths:     ["models"]
+analysis-paths:  ["analyses"]
+test-paths:      ["tests", "unit_tests"]
+seed-paths:      ["seeds"]
+macro-paths:     ["macros"]
+snapshot-paths:  ["snapshots"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# >= 1.9 : microbatch, `schema` sur les snapshots, hard_deletes.
+# < 3.0 : compatible dbt Core 1.9/1.10 (CI) et dbt Fusion 2.x (poste local).
+require-dbt-version: [">=1.9.0", "<3.0.0"]
+
+# ============================================
+# Query tag on every run
+# ============================================
+# `do` : set_query_tag retourne le tag précédent, qu'on ne veut pas
+# rendre comme SQL dans le hook.
+on-run-start:
+  - "{% do set_query_tag() %}"
+
+on-run-end:
+  - "{% do unset_query_tag() %}"
+
+# ============================================
+# Modèles
+# ============================================
+models:
+  fintrack_perf_scale:
+    +persist_docs:
+      relation: true
+      columns: true
+
+    staging:
+      +materialized: view
+      +schema: staging
+      +tags: ['staging']
+      # Transactions et virements overridés en incremental dans leurs configs
+
+    intermediate:
+      +materialized: ephemeral
+      +tags: ['intermediate']
+
+    marts:
+      +materialized: table
+      +tags: ['marts']
+      core:
+        +schema: marts_core
+      finance:
+        +schema: marts_finance
+      analytics:
+        +schema: marts_analytics
+
+  # Elementary (observabilité) : tables de résultats et de métriques
+  elementary:
+    +schema: elementary
+    +tags: ['elementary']
+
+# ============================================
+# Snapshots
+# ============================================
+# `schema` (dbt >= 1.9) passe par generate_schema_name : SNAPSHOTS en prod,
+# DEV_<user>_snapshots en dev, CI_<PR> en CI. L'ancien `target_schema`
+# faisait écrire dev et CI dans le même schéma SNAPSHOTS partagé.
+snapshots:
+  fintrack_perf_scale:
+    +schema: snapshots
+
+# ============================================
+# Seeds
+# ============================================
+# seeds:
+#   fintrack_perf_scale:
+#     +schema: raw
+
+# ============================================
+# Tests
+# ============================================
+# store_failures transforme chaque test en CREATE TABLE AS + SELECT : utile
+# en prod (piste d'audit des lignes en échec), coût inutile en dev / CI.
+tests:
+  +store_failures: "{{ (target.name == 'prod') | as_bool }}"
+  +schema: audit_test_failures
+
+# ============================================
+# Variables
+# ============================================
+
+vars:
+  # Fenêtre de retraitement des modèles incrémentaux, sur _loaded_at
+  # (horodatage d'ingestion, monotone : une transaction mise à jour est
+  # rechargée avec un nouveau _loaded_at). 1 jour couvre les chargements
+  # concurrents / rejoués ; 7 jours réécrivait ~97k lignes inchangées par run
+  # (cf. docs/PERF_LOG.md). Augmenter ponctuellement après un incident :
+  #   dbt build --vars '{incremental_lookback_days: 7}'
+  incremental_lookback_days: 1
+
+  # Filtres de développement (accélère les runs en dev)
+  dev_start_date: '2024-01-01'
+  dev_end_date:   '2024-12-31'
+
+  # dbt-utils
+  'dbt_date:time_zone': 'Europe/Paris'
