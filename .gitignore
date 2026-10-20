@@ -1,0 +1,10 @@
+# Environnements et données générées (≈ 3 Go en scale L)
+.venv/
+data/
+logs/
+__pycache__/
+*.pyc
+.DS_Store
+
+# CI
+prod-artifacts/
