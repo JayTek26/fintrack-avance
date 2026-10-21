@@ -1139,7 +1139,7 @@ Déclencheurs :
 | PR de démonstration avec un modèle modifié | le run vert de la PR #7 ne reconstruisait aucun modèle | ouvrir une PR qui touche `dbt/models/` et attendre le ✅ avant de merger |
 | Réglages warehouses | le rôle dev n'a pas les droits `ALTER WAREHOUSE` | commandes dans PERF_LOG, section Warehouses |
 | Profondeur de clustering < 3 | 3,09 au mieux : 288 valeurs de clé pour 32 partitions à l'échelle L | revérifier à l'échelle prod |
-| Captures Query Profile | impossible depuis le terminal | query_id dans PERF_LOG → Snowsight |
+| ~~Captures Query Profile~~ | **fait** : 4 captures Snowsight dans `docs/query_profiles/`, intégrées au PERF_LOG | — |
 | Retrait des clés de clustering de stg / raw | recommandé, non testé sur un cycle complet | à valider |
 | ~~Test unitaire `fct_virements` en `dbt test` seul~~ | corrigé : il manquait l'override `is_incremental` (voir DESIGN, écarts dbt Core / Fusion) | — |
 
