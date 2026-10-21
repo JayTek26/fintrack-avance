@@ -2,7 +2,10 @@ version: 2
 
 models:
   - name: mart_tenant_kpis_daily
-    description: "KPIs quotidiens par tenant — dashboard exécutif"
+    description: |
+      KPIs quotidiens par tenant — dashboard exécutif.
+      Une ligne par (tenant, jour) : volumes, revenus de frais, alertes
+      compliance. Source : fct_transactions (statuts validee / en_attente).
     data_tests:
       - dbt_utils.unique_combination_of_columns:
           arguments:
