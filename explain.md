@@ -1060,7 +1060,7 @@ Dépôt : `fintrack-avance/` (remote `git@github.com:JayTek26/fintrack-avance.gi
 | Profondeur de clustering < 3 | 3,09 au mieux : 288 valeurs de clé pour 32 partitions à l'échelle L | revérifier à l'échelle prod |
 | Captures Query Profile | impossible depuis le terminal | query_id dans PERF_LOG → Snowsight |
 | Retrait des clés de clustering de stg / raw | recommandé, non testé sur un cycle complet | à valider |
-| Test unitaire `fct_virements` en `dbt test` seul | particularité de dbt Fusion 2.0.8 (passe en `dbt build`) | utiliser `dbt build` |
+| ~~Test unitaire `fct_virements` en `dbt test` seul~~ | corrigé : il manquait l'override `is_incremental` (voir DESIGN, écarts dbt Core / Fusion) | — |
 
 ---
 

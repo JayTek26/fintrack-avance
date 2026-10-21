@@ -128,4 +128,8 @@ Spécificités Fusion :
 - `latest_version_pointer: {enabled: false}` sur la v1 de fct_transactions (sinon Fusion crée une vue pointeur en conflit avec l'alias) ;
 - `access` / `group` placés sous `config:`.
 
-Particularité observée avec Fusion 2.0.8 : le test unitaire de `fct_virements` échoue en `dbt test` seul (schéma périmé en cache) mais passe en `dbt build`. C'est l'une des raisons pour lesquelles le DAG et la CI utilisent `dbt build`.
+Écarts dbt Core vs Fusion, corrigés après le premier passage en CI (le projet avait d'abord été validé sous Fusion seulement) :
+- `set_query_tag` : au parsing, dbt Core n'exécute pas de requête (`run_query` renvoie `None`), d'où une garde `execute`.
+- Tests unitaires sur un modèle incrémental : dbt Core exige un override explicite `is_incremental`. Son absence expliquait aussi l'échec du test de `fct_virements` en `dbt test` seul sous Fusion.
+- Étape `--empty` de la CI : `dbt build` et non `dbt run`, pour inclure le snapshot dont dépend `dim_comptes_scd2`.
+Validé : séquence complète de la CI rejouée sous dbt Core 1.10 (182 PASS).

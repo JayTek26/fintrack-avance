@@ -103,8 +103,9 @@ jobs:
       # Les tests unitaires ont besoin que les relations des modèles testés
       # existent : on les crée vides (--empty), puis on construit en
       # --full-refresh (sinon les incrémentaux, créés vides, ne chargeraient
-      # rien). Les sources lourdes sont limitées au dernier mois en CI
-      # (cf. stg_transactions, var ci_lookback_days).
+      # rien). `build` et non `run` pour l'étape --empty : il inclut le
+      # snapshot, dont dépend dim_comptes_scd2. Les sources lourdes sont
+      # limitées au dernier mois en CI (cf. stg_transactions, var ci_lookback_days).
       - name: dbt build (Slim CI)
         run: |
           if [ "$has_state" = "true" ]; then
@@ -112,7 +113,8 @@ jobs:
           else
             SELECTION=()
           fi
-          dbt run   --target ci --empty        "${SELECTION[@]}" --exclude tag:experimental
+          dbt build --target ci --empty        "${SELECTION[@]}" --exclude tag:experimental \
+            --exclude-resource-type test --exclude-resource-type unit_test
           dbt build --target ci --full-refresh "${SELECTION[@]}" --exclude tag:experimental \
             --vars '{tests_complets: true}'
 

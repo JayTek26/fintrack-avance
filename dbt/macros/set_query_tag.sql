@@ -12,7 +12,9 @@
         Retourne le tag précédent, comme le macro de l'adapter, pour que
         unset_query_tag puisse le restaurer.
     -#}
-    {% if target.type == 'snowflake' %}
+    {#- execute : au parsing, dbt Core n'exécute pas de requête (run_query
+        renvoie None) ; dbt Fusion le tolère, pas dbt Core (CI). -#}
+    {% if target.type == 'snowflake' and execute %}
         {% set tag = 'team=data-eng|project=fintrack-perf-scale|target=' ~ target.name %}
         {% if model is defined and model is mapping and model.get('resource_type') in ('model', 'snapshot', 'seed') %}
             {% set tag = tag ~ '|model=' ~ model['name'] %}
@@ -26,7 +28,7 @@
 
 
 {% macro unset_query_tag(original_query_tag=none) -%}
-    {% if target.type == 'snowflake' %}
+    {% if target.type == 'snowflake' and execute %}
         {% if original_query_tag %}
             {% do run_query("alter session set query_tag = '" ~ original_query_tag ~ "'") %}
         {% else %}
