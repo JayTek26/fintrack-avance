@@ -127,7 +127,9 @@ Lecture :
 
 ## Analyse Query Profile
 
-Trois requêtes fréquentes, exécutées sur dev avec `USE_CACHED_RESULT = FALSE`, profils extraits avec `GET_QUERY_OPERATOR_STATS` (identifiants ci-dessous, rejouables dans Snowsight → Query History → Profile). Captures d'écran Snowsight : à ajouter (non disponibles depuis la CLI).
+Trois requêtes fréquentes, exécutées sur dev (`WH_DEV`, XSMALL) avec `USE_CACHED_RESULT = FALSE`. Profils extraits avec `GET_QUERY_OPERATOR_STATS`, et captures Snowsight (onglet *Query Profile*) dans `docs/query_profiles/`.
+
+> **Deux mesures d'octets.** Snowsight affiche les octets **lus sur disque (compressés)**, alors que `QUERY_HISTORY.BYTES_SCANNED`, utilisé dans les listes ci-dessous, compte les données décompressées. Pour Q1 : 88,9 Mo dans Snowsight contre 840,8 Mo dans `QUERY_HISTORY`. Les comparaisons avant/après se font toujours à source identique. Pour Q3, Snowsight additionne les partitions des deux tables (22 / 34 = 21 / 33 du fait + 1 / 1 de dim_comptes).
 
 ### Query 1 : lookup support / rapprochement par `external_transaction_id`
 
@@ -139,7 +141,15 @@ Trois requêtes fréquentes, exécutées sur dev avec `USE_CACHED_RESULT = FALSE
 - Node dominant : TableScan (97,1 % du temps)
 - Bytes spilled to local / remote : 0 / 0
 - Durée : 686 ms (351 ms d'exécution)
+![Query Profile Q1 — scan complet](query_profiles/q1.png)
+
+*Snowsight : TableScan = 97,1 % du temps, 33 / 33 partitions, 88,9 Mo lus, 442 ms d'exécution, dont 94,1 % d'I/O disque distant.*
+
 - **Recommandation :** Search Optimization `EQUALITY(external_transaction_id)`. Mesuré après activation (query_id `01c7dc4f-030c-5e47-0033-aad70016d3d2`) : nœud *Search Optimization Access*, **1 / 33 partitions**, 136,3 Mo (−84 %). La latence ne bouge pas à cette échelle (952 ms, dominés par la compilation), mais le gain en octets croît linéairement avec la table. → Activée en prod par post-hook (`ensure_search_optimization`), voir Décisions.
+
+![Query Profile Q1 avec Search Optimization](query_profiles/q1_search_optimization.png)
+
+*Snowsight : le nœud TableScan est remplacé par **Search Optimization Access** (insight « Search optimization used »), **1 partition** lue (scan à 3,03 %), 38,3 Mo.*
 
 ### Query 2 : dashboard tenant — volumes mensuels sur un trimestre
 
@@ -151,6 +161,10 @@ Trois requêtes fréquentes, exécutées sur dev avec `USE_CACHED_RESULT = FALSE
 - Node dominant : TableScan (60 %), puis Filter et Aggregate
 - Bytes spilled to local / remote : 0 / 0
 - Durée : 394 ms
+![Query Profile Q2 — pruning par la clé de clustering](query_profiles/q2.png)
+
+*Snowsight : insight **« Filter with clustering key »** sur le TableScan, 4 / 33 partitions, 3,83 Mo lus, 253 ms. 99 270 lignes filtrées sur le tenant 3, puis agrégées en 6 lignes.*
+
 - **Recommandation :** rien à changer sur la table, c'est le cas d'usage pour lequel la clé de clustering est choisie. Côté BI : pointer les dashboards sur `mart_tenant_kpis_daily` (8 760 lignes) plutôt que sur le fait dès que la maille journalière suffit, et laisser le result cache jouer (WH_REPORTING `AUTO_SUSPEND = 300`).
 
 ### Query 3 : relevé d'un compte par IBAN sur 90 jours
@@ -163,6 +177,10 @@ Trois requêtes fréquentes, exécutées sur dev avec `USE_CACHED_RESULT = FALSE
 - Node dominant : TableScan de fct_transactions (97,9 %), avec un JoinFilter (filtre de bloom à l'exécution)
 - Bytes spilled to local / remote : 0 / 0
 - Durée : 1 031 ms
+![Query Profile Q3 — jointure fait / dimension par IBAN](query_profiles/q3.png)
+
+*Snowsight : Filter `C.IBAN = $IBAN` → 1 ligne de dim_comptes, puis Join sur `COMPTE_ID`, avec un JoinFilter (filtre de bloom) qui réduit le fait à 10 lignes. Le TableScan du fait pèse 97,9 % du temps. 22 / 34 partitions (deux tables), 26,6 Mo, 517 ms.*
+
 - **Recommandations :**
   1. Ajouter `tenant_id` au prédicat. L'application connaît toujours le tenant, et une row access policy par tenant l'imposerait de toute façon. Le pruning passe alors sur la clé de clustering.
   2. Résoudre `compte_id` d'abord (lookup sur dim_comptes), puis interroger le fait par `compte_id`. Mesuré avec la SO sur `compte_id` (`01c7dc4f-030c-5e6a-0033-aad70015645e`) : **37 ms d'exécution**, mais 18 / 33 partitions seulement. La SO sur `compte_id` est écartée (bénéfice faible, voir Décisions).

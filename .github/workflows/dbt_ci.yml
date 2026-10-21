@@ -153,10 +153,28 @@ jobs:
           else
             SELECTION=()
           fi
-          dbt build --target ci --empty        "${SELECTION[@]}" --exclude tag:experimental \
-            --exclude-resource-type test --exclude-resource-type unit_test
-          dbt build --target ci --full-refresh "${SELECTION[@]}" --exclude tag:experimental \
-            --vars '{tests_complets: true}'
+          # Elementary n'enregistre pas les résultats de CI : ce n'est pas
+          # l'historique de prod, et quand aucun modèle n'est modifié, le
+          # schéma CI n'existe pas → son hook on-run-end échouait (PR #8).
+          CI_VARS='{tests_complets: true, disable_run_results: true, disable_tests_results: true, disable_dbt_artifacts_autoupload: true, disable_dbt_invocation_autoupload: true, disable_dbt_columns_autoupload: true}'
+          # Lance une commande dbt ; en cas d'échec, remonte la cause en
+          # annotation (lisible sur la PR sans ouvrir les logs).
+          run_dbt() {
+            local rc=0
+            "$@" > dbt_step.log 2>&1 || rc=$?
+            cat dbt_step.log
+            if [ "$rc" -ne 0 ]; then
+              local msg
+              msg=$(grep -E "ERROR|FAIL |Error|error:|does not exist|not authorized" dbt_step.log \
+                    | head -8 | tr '\n' ' ' | tr -s ' ' | cut -c1-1500 || true)
+              echo "::error title=dbt build (code $rc)::${msg:-aucun message reconnu, voir le log de cette etape}"
+              exit "$rc"
+            fi
+          }
+          run_dbt dbt build --target ci --empty        "${SELECTION[@]}" --exclude tag:experimental \
+            --exclude-resource-type test --exclude-resource-type unit_test --vars "$CI_VARS"
+          run_dbt dbt build --target ci --full-refresh "${SELECTION[@]}" --exclude tag:experimental \
+            --vars "$CI_VARS"
 
       - name: Publier les résultats
         if: always()
