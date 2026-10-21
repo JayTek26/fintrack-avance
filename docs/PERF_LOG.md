@@ -24,7 +24,7 @@ Constat du 20/10/2026 : `_loaded_at` est NULL sur 100 % des lignes de raw_transa
 - **Cause :** `COPY INTO` positionnel (`SKIP_HEADER = 1`) avec `ERROR_ON_COLUMN_COUNT_MISMATCH = FALSE`. Le CSV a une colonne de moins que la table, donc Snowflake remplit la dernière colonne avec NULL : le `DEFAULT CURRENT_TIMESTAMP()` ne s'applique pas.
 - **Impact :** tous les filtres incrémentaux (`_loaded_at >= max(_loaded_at) - N`) renvoyaient 0 ligne. Les runs incrémentaux du 20/10 au matin réussissaient sans rien traiter. La fraîcheur des sources ne pouvait pas non plus être mesurée.
 - **Correctif pour les prochains chargements :** `scripts/snowflake/03_stage_and_copy.sql` passe en `PARSE_HEADER = TRUE` + `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE` + `INCLUDE_METADATA = (_loaded_at = METADATA$START_SCAN_TIME)`, validé sur un fichier réel en dev. Le même pattern est utilisé dans `orchestration/sql/copy_into_raw.sql`.
-- **Données existantes :** en prod, il reste **à corriger**. Le backfill n'a pas été exécuté sur `FINTRACK_PROD.RAW`. En dev, il a été fait sur un clone zero-copy (`FINTRACK_DEV.DEV_JAY_RAW`, voir ci-dessous) avec l'heure réelle du COPY relevée dans `ACCOUNT_USAGE.COPY_HISTORY` (14/10/2026 08:55, heure du compte). Requête type pour la prod, par table : `UPDATE raw_transactions SET _loaded_at = '2026-10-14 08:55:19' WHERE _loaded_at IS NULL;` (≈ 27 s sur XSMALL pour 10M lignes en dev).
+- **Données existantes :** **corrigées en prod le 21/10/2026** (UPDATE avec l'heure du COPY, après un clone de sauvegarde du schéma RAW). Confirmé par les tests `not_null` sur `_loaded_at`, exécutés en CI sur `FINTRACK_PROD.RAW` (PR #8, verts). En dev, le backfill avait été fait sur un clone zero-copy (`FINTRACK_DEV.DEV_JAY_RAW`, voir ci-dessous) avec l'heure réelle du COPY relevée dans `ACCOUNT_USAGE.COPY_HISTORY` (14/10/2026 08:55, heure du compte). Requête type pour la prod, par table : `UPDATE raw_transactions SET _loaded_at = '2026-10-14 08:55:19' WHERE _loaded_at IS NULL;` (≈ 27 s sur XSMALL pour 10M lignes en dev).
 
 ## Protocole de mesure
 
@@ -86,7 +86,7 @@ Ce qui a été changé, par ordre de gain :
 
 ### Extrapolation à la prod
 
-On ne peut pas mesurer la prod (le pipeline dbt n'y a jamais été déployé). Le coût d'un run incrémental dépend du **delta** et non de l'historique, à deux exceptions près, qui sont linéaires en volume : le scan de la cible par le `MERGE` (0,86 Go pour 10M lignes) et les marts en `table` reconstruits à chaque run (mart_solde_journalier, mart_transactions_anomalies : environ 9M lignes chacun).
+Le pipeline est déployé en prod depuis le 21/10/2026, mais sans encore d'historique de runs à mesurer : ce qui suit reste une extrapolation, à remplacer par les mesures prod (`QUERY_HISTORY` par `model=`) au bout de quelques semaines. Le coût d'un run incrémental dépend du **delta** et non de l'historique, à deux exceptions près, qui sont linéaires en volume : le scan de la cible par le `MERGE` (0,86 Go pour 10M lignes) et les marts en `table` reconstruits à chaque run (mart_solde_journalier, mart_transactions_anomalies : environ 9M lignes chacun).
 À 100M transactions/mois, le delta horaire est d'environ 140k lignes, et les marts complets deviennent le poste dominant. Prochaine étape : passer mart_solde_journalier et mart_transactions_anomalies en incrémental par partition de jours.
 
 ## Merge vs Microbatch (US 3.2)

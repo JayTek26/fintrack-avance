@@ -1,6 +1,6 @@
 # FinTrack Perf & Scale — Rapport final
 
-**Date :** 20/10/2026 · **Périmètre :** sprints 1 à 6 · **Détails chiffrés :** `docs/PERF_LOG.md` · **Architecture :** `docs/DESIGN.md` · **Versioning :** `docs/CONTRACTS.md`
+**Date :** 20/10/2026, mis à jour le 21/10/2026 (déploiement prod et CI) · **Périmètre :** sprints 1 à 6 · **Détails chiffrés :** `docs/PERF_LOG.md` · **Architecture :** `docs/DESIGN.md` · **Versioning :** `docs/CONTRACTS.md`
 
 ## Résumé
 
@@ -8,7 +8,7 @@ Le pipeline est désormais incrémental de bout en bout, testé et versionné. I
 - `_loaded_at` était NULL sur toute la RAW, donc **aucun incrémental ne traitait de ligne** ;
 - `montant_eur` était **multiplié** par le taux au lieu d'être divisé (un montant en JPY était faux d'un facteur ≈ 30 000).
 
-Toutes les mesures ont été faites en dev (XSMALL, 10M transactions). La prod n'a pas encore reçu le pipeline dbt : les gains en prod sont donc des **extrapolations**, présentées comme telles.
+Toutes les mesures de performance ont été faites en dev (XSMALL, 10M transactions). Le pipeline est **déployé en prod depuis le 21/10/2026**, après le backfill de `_loaded_at` sur `FINTRACK_PROD.RAW`, et la **CI GitHub est verte** (PR #8). Il n'y a en revanche pas encore d'historique de runs en prod : les gains en prod restent des **extrapolations**, présentées comme telles.
 
 ## 1. Gains de performance obtenus
 
@@ -36,7 +36,8 @@ Toutes les mesures ont été faites en dev (XSMALL, 10M transactions). La prod n
 - **Industrialisation.**
   - Contrat enforcé et versions v1 / v2 sur `fct_transactions` ;
   - 119 tests de données et 6 tests unitaires, tous verts ;
-  - Slim CI validée localement (148 / 148 en 1 min 03 s dans un schéma `CI_0`, nettoyé ensuite) ;
+  - Slim CI **verte sur GitHub** (PR #8, 1 min 05 : secrets, connexion, manifest de prod, `--defer`, nettoyage du schéma `CI_<PR>`) ; séquence complète également rejouée sous dbt Core 1.10 (182 PASS) ;
+  - déploiement prod réalisé (`dbt build --target prod --full-refresh`) ;
   - DAG chargé sans erreur dans une `DagBag` Airflow 2.10 ;
   - Elementary installé, avec 2 anomalies de volumétrie détectées.
 
@@ -59,7 +60,7 @@ Microbatch reste le bon choix pour des faits **immuables** à forte volumétrie 
    - test de volumétrie Elementary sur le fait ;
    - assertion `error_count = 0` après chaque COPY.
 
-   *Reste à faire :* un test `not_null` sur `_loaded_at` dans les sources, et **le backfill de `FINTRACK_PROD.RAW`, qui n'est pas encore exécuté** (bloquant avant la mise en prod).
+   - **fait le 21/10 :** backfill de `FINTRACK_PROD.RAW`, et tests `not_null` sur `_loaded_at` des sources `raw_transactions`, `raw_comptes` et `raw_virements`. Ils passent sur la RAW de prod en CI : c'est le garde-fou qui aurait détecté l'incident dès le 14/10.
 2. **Mises à jour en place dans RAW et dérive du clustering.** Si l'ingestion fait des UPDATE au lieu d'append (upsert côté core banking), le pruning sur `_loaded_at` disparaît : partitions de 2023 avec un `_loaded_at` de 2025, profondeur 33 dans notre simulation. Le scan de RAW redevient complet à chaque run. Côté fait, chaque MERGE dégrade la profondeur (3,09 → 11,95) en attendant l'Automatic Clustering, payé en serverless.
    *Atténuations :*
    - contrat d'interface « RAW append-only » avec l'équipe ingestion ;
@@ -76,7 +77,10 @@ Microbatch reste le bon choix pour des faits **immuables** à forte volumétrie 
    - alertes Slack avec retries différenciés ;
    - `date_cotation_source` pour détecter les taux reportés trop longtemps (test d'âge à ajouter).
 
-Risques secondaires : overhead dbt (≈ 50 % du wall-clock n'est pas du SQL), COMPUTE_WH utilisé hors query tags (2,8 crédits cette semaine), et une particularité de dbt Fusion 2.0.8 sur les tests unitaires en `dbt test` seul (contournée par `dbt build`).
+Risques secondaires :
+- overhead dbt (≈ 50 % du wall-clock n'est pas du SQL) ;
+- COMPUTE_WH utilisé hors query tags (2,8 crédits la semaine du 19/10) ;
+- **divergence entre dbt Fusion (postes locaux) et dbt Core (CI).** Trois incompatibilités ne sont apparues qu'en CI : requête au parsing, override `is_incremental` des tests unitaires, étape `--empty`. Atténuation : valider sous dbt Core avant chaque PR, ou aligner tout le monde sur le même moteur.
 
 ## 4. Absorber 10× le volume (1 milliard de transactions / mois)
 
@@ -105,13 +109,19 @@ Risques secondaires : overhead dbt (≈ 50 % du wall-clock n'est pas du SQL), CO
    - tests complets uniquement hebdomadaires, et échantillonnés au-delà.
 7. **dbt.** Projet découpé par domaine (dbt Mesh : `core` public, `finance` et `analytics` consommateurs via `ref` inter-projets et contrats). Cela réduit le temps de parsing et d'orchestration, qui représente déjà ≈ 50 % du wall-clock aujourd'hui.
 
-## Reste à faire avant la mise en production
+## Suites
 
-| Action | Responsable | Bloquant |
+Réalisé le 21/10/2026 :
+- backfill de `_loaded_at` sur `FINTRACK_PROD.RAW`, confirmé par les tests `not_null` exécutés en CI sur la RAW de prod ;
+- premier déploiement prod ;
+- secrets GitHub et PR de démonstration avec CI verte (PR #8) ;
+- captures Query Profile Snowsight (`docs/query_profiles/`, intégrées au PERF_LOG).
+
+| Action restante | Responsable | Bloquant |
 |---|---|---|
-| Backfill de `_loaded_at` sur `FINTRACK_PROD.RAW` (requête type dans le PERF_LOG) | Data Eng (rôle TRANSFORM / INGESTION) | **oui** |
-| Premier déploiement prod (`dbt build --target prod --full-refresh` sur un warehouse LARGE) | Data Eng | oui (la CI `--defer` en dépend) |
-| Secrets GitHub + PR de démonstration (CI verte) | Data Eng | livrable 5 |
-| Application des réglages warehouses (PERF_LOG) | SRE / ACCOUNTADMIN | non |
+| Vérifier le watermark des tables incrémentales prod (`max(_loaded_at)` non NULL sur `FCT_TRANSACTIONS`) | Data Eng | à confirmer (sinon les runs incrémentaux ne traitent rien) |
+| Application des réglages warehouses (PERF_LOG) — condition de l'objectif « coûts ÷ 2 » | SRE / ACCOUNTADMIN | non |
+| Protection de `main` (« Require status checks to pass ») — les PR #1 à #6 ont été mergées CI rouge | Data Eng | non |
+| Mesure des runs prod sur quelques semaines (`QUERY_HISTORY` par `model=`, `WAREHOUSE_METERING_HISTORY`) pour remplacer les extrapolations | Data Eng | non |
+| Profondeur de clustering de `fct_transactions` en prod (cible < 3) | Data Eng | non |
 | Validation finance des taux de TVA de la v2 | Finance | non |
-| Captures Query Profile Snowsight (query_id dans le PERF_LOG) | Data Eng | non |
