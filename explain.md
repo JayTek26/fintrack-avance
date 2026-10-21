@@ -1085,6 +1085,7 @@ Les échecs se sont enchaînés : chaque correction a fait apparaître le probl�
 | 5 | PR #6, tentative 1 | Vérifier les secrets | **Les 3 secrets étaient absents** du dépôt | Jay a créé `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_CI_USER`, `SNOWFLAKE_CI_PASSWORD`, `SNOWFLAKE_PROD_USER` dans *Repository secrets* |
 | 6 | PR #6, tentative 2 | `dbt debug` (code 2) | Erreur introduite par le diagnostic lui-même : l'apostrophe de « l'étape » dans `${msg:-… l'étape}` ouvrait une chaîne bash. Le script était invalide, et bash s'arrêtait **avant** de lancer dbt. | Étape réécrite (sortie dans un fichier, test du code retour), testée en local dans les deux cas, syntaxe de toutes les étapes vérifiée avec `bash -n` (`8b23c2f`) |
 | ✅ | **PR #7** | — | — | **Run vert en 55 s**, terminé avant le merge |
+| 7 | PR #8, 1er run | `dbt build` (code 2) | Le hook `on-run-end` d'**Elementary** enregistre les résultats dans le schéma CI. La PR ne modifiait aucun modèle, donc rien n'était construit et le schéma `CI_8` n'existait pas → `Schema … does not exist`. Les builds complets précédents créaient ce schéma, ce qui masquait le problème. | Variables Elementary `disable_run_results`, `disable_tests_results`, `disable_dbt_*_autoupload` passées en CI (les résultats de CI n'ont rien à faire dans l'historique d'observabilité), et cause d'échec du `dbt build` remontée en annotation |
 
 Avant de pousser les correctifs 1 à 3, toute la séquence CI a été rejouée en local sous **dbt Core 1.10.23** (venv jetable), sur un schéma `CI_998` vierge avec les sources `FINTRACK_PROD.RAW` : `dbt build --empty` 57 PASS, puis `dbt build --full-refresh` 182 PASS, puis nettoyage du schéma.
 
@@ -1122,6 +1123,10 @@ Déclencheurs :
 - `pull_request` vers `main` / `staging` qui touche `dbt/**` ou le workflow → `slim-ci` ;
 - `push` sur `main` → `publish-prod-manifest` (manifest de référence des PR suivantes) ;
 - **`workflow_dispatch`** (Actions → dbt CI → Run workflow) → les deux jobs. En lancement manuel, le schéma s'appelle `CI_run<id>`.
+
+**Constat de la PR #8 :** ses tests `not_null` sur `_loaded_at` passent sur `FINTRACK_PROD.RAW` (reproduit en local avec dbt Core) : le **backfill prod est confirmé**.
+
+**Note sur la sélection :** les 6 tests unitaires apparaissent toujours dans `state:modified+`. Ils sont désactivés en prod, donc absents du manifest de référence, et dbt les voit comme « nouveaux ». Ils ne s'exécutent que si leur modèle est lui-même sélectionné. C'est sans conséquence.
 
 **Limite du run vert :** la PR #7 ne modifiait que le workflow. `state:modified+` n'a donc sélectionné aucun modèle dbt (build de 13 s). La chaîne complète est prouvée (secrets, connexion, manifest de prod, defer, nettoyage), mais pas encore un build réel de modèle en CI. Pour la démonstration complète, il reste à ouvrir une PR qui modifie un modèle (par exemple une colonne ou une description dans `dbt/models/`) et à attendre le ✅.
 
