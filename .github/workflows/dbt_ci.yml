@@ -46,11 +46,14 @@ jobs:
   # PR : Slim CI
   # ----------------------------------------------------------
   slim-ci:
-    if: github.event_name == 'pull_request'
+    # pull_request, ou lancement manuel (Actions → Run workflow) pour
+    # vérifier la CI sans ouvrir de PR
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      DBT_CI_PR_ID: ${{ github.event.pull_request.number }}
+      # numéro de PR, ou run<id> en lancement manuel → schéma CI_<…> unique
+      DBT_CI_PR_ID: ${{ github.event.pull_request.number || format('run{0}', github.run_id) }}
       SNOWFLAKE_CI_USER: ${{ secrets.SNOWFLAKE_CI_USER }}
       SNOWFLAKE_CI_PASSWORD: ${{ secrets.SNOWFLAKE_CI_PASSWORD }}
     defaults:
@@ -114,14 +117,17 @@ jobs:
 
       - name: dbt debug
         run: |
-          set -o pipefail
-          dbt debug --target ci 2>&1 | tee dbt_debug.log || {
-            # Remonte la cause en annotation (lisible sans ouvrir les logs)
-            msg=$(grep -iE "error|failed|denied|incorrect|mfa|multi-factor|not allowed|250001|390" dbt_debug.log \
-                  | grep -v "^\s*$" | head -5 | tr '\n' ' ' | cut -c1-900)
-            echo "::error title=dbt debug::${msg:-voir le log de l'étape}"
-            exit 1
-          }
+          # Sortie dans un fichier puis test explicite du code retour : la
+          # cause est remontée en annotation, lisible sans ouvrir les logs.
+          rc=0
+          dbt debug --target ci > dbt_debug.log 2>&1 || rc=$?
+          cat dbt_debug.log
+          if [ "$rc" -ne 0 ]; then
+            msg=$(grep -iE "error|fail|denied|incorrect|mfa|multi-factor|not allowed|25000|390" dbt_debug.log \
+                  | head -6 | tr '\n' ' ' | tr -s ' ' | cut -c1-1500 || true)
+            echo "::error title=dbt debug (code $rc)::${msg:-aucun message reconnu, voir le log de cette etape}"
+            exit "$rc"
+          fi
 
       # L'artefact est téléchargé dans <repo>/prod-artifacts (= ../prod-artifacts
       # depuis dbt/ : `path` est relatif au workspace, pas au working-directory)
@@ -156,7 +162,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: dbt-ci-artifacts-pr-${{ github.event.pull_request.number }}
+          name: dbt-ci-artifacts-${{ github.event.pull_request.number || github.run_id }}
           path: |
             dbt/target/run_results.json
             dbt/target/manifest.json
