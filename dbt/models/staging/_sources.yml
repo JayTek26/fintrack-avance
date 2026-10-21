@@ -39,6 +39,16 @@ sources:
         columns:
           - name: compte_id
             data_tests: [unique, not_null]
+          - name: _loaded_at
+            description: >
+              Horodatage d'arrivée dans RAW, watermark de tous les modèles
+              incrémentaux. Volontairement testé sur toute la table (pas de
+              fenêtre) : un filtre sur _loaded_at masquerait justement les NULL.
+              Peu coûteux, car Snowflake connaît le nombre de NULL de chaque
+              micro-partition. Garde-fou ajouté après l'incident du 14/10/2026
+              (COPY positionnel → _loaded_at NULL → incrémentaux vides sans erreur).
+            data_tests:
+              - not_null
 
       - name: raw_transactions
         description: "Table de faits large — 80 colonnes, jusqu'à 100M lignes"
@@ -67,6 +77,16 @@ sources:
                     field: tenant_id
                   config:
                     where: "__fenetre_incrementale__"
+          - name: _loaded_at
+            description: >
+              Horodatage d'arrivée dans RAW, watermark de tous les modèles
+              incrémentaux. Volontairement testé sur toute la table (pas de
+              fenêtre) : un filtre sur _loaded_at masquerait justement les NULL.
+              Peu coûteux, car Snowflake connaît le nombre de NULL de chaque
+              micro-partition. Garde-fou ajouté après l'incident du 14/10/2026
+              (COPY positionnel → _loaded_at NULL → incrémentaux vides sans erreur).
+            data_tests:
+              - not_null
 
       - name: raw_virements
         description: "Virements internes entre comptes"
@@ -75,6 +95,16 @@ sources:
         columns:
           - name: virement_id
             data_tests: [unique, not_null]
+          - name: _loaded_at
+            description: >
+              Horodatage d'arrivée dans RAW, watermark de tous les modèles
+              incrémentaux. Volontairement testé sur toute la table (pas de
+              fenêtre) : un filtre sur _loaded_at masquerait justement les NULL.
+              Peu coûteux, car Snowflake connaît le nombre de NULL de chaque
+              micro-partition. Garde-fou ajouté après l'incident du 14/10/2026
+              (COPY positionnel → _loaded_at NULL → incrémentaux vides sans erreur).
+            data_tests:
+              - not_null
 
       - name: raw_titulaires
         description: "Personnes physiques titulaires de comptes"
