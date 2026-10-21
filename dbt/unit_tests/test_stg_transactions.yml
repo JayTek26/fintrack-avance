@@ -2,6 +2,11 @@ unit_tests:
   - name: test_montant_signe_credit
     description: "Un CREDIT doit produire un montant_signe positif"
     model: stg_transactions
+    # dbt Core exige un override explicite sur un modèle incrémental :
+    # false = comportement d'un premier build / full-refresh
+    overrides:
+      macros:
+        is_incremental: false
     given:
       - input: source('fintrack_raw', 'raw_transactions')
         rows:
@@ -17,6 +22,11 @@ unit_tests:
   - name: test_montant_signe_debit
     description: "Un DEBIT doit produire un montant_signe négatif"
     model: stg_transactions
+    # dbt Core exige un override explicite sur un modèle incrémental :
+    # false = comportement d'un premier build / full-refresh
+    overrides:
+      macros:
+        is_incremental: false
     given:
       - input: source('fintrack_raw', 'raw_transactions')
         rows:
@@ -32,6 +42,11 @@ unit_tests:
   - name: test_transactions_test_exclues
     description: "Les transactions is_test=true sont exclues du staging"
     model: stg_transactions
+    # dbt Core exige un override explicite sur un modèle incrémental :
+    # false = comportement d'un premier build / full-refresh
+    overrides:
+      macros:
+        is_incremental: false
     given:
       - input: source('fintrack_raw', 'raw_transactions')
         rows:
