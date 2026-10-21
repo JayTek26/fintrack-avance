@@ -86,8 +86,42 @@ jobs:
       - name: dbt deps
         run: dbt deps
 
+      # Échoue tôt, avec un message explicite, si un secret manque.
+      # N'affiche jamais les valeurs : uniquement « défini / vide » et, pour
+      # le compte (non secret), sa forme.
+      - name: Vérifier les secrets Snowflake
+        run: |
+          ok=true
+          for v in SNOWFLAKE_ACCOUNT SNOWFLAKE_CI_USER SNOWFLAKE_CI_PASSWORD; do
+            if [ -z "${!v}" ]; then
+              echo "::error title=Secret manquant::$v est vide ou absent (Settings → Secrets and variables → Actions → Repository secrets)"
+              ok=false
+            else
+              echo "$v : défini (${#v} caractères pour le nom, valeur masquée)"
+            fi
+          done
+          case "$SNOWFLAKE_ACCOUNT" in
+            *.snowflakecomputing.com*|http*)
+              echo "::error title=Format du compte::SNOWFLAKE_ACCOUNT doit être l'identifiant seul (ex. ORGNAME-ACCOUNTNAME), sans https:// ni .snowflakecomputing.com"
+              ok=false ;;
+          esac
+          case "$SNOWFLAKE_ACCOUNT" in
+            *" "*|*$'\n'*)
+              echo "::error title=Format du compte::SNOWFLAKE_ACCOUNT contient un espace ou un retour à la ligne"
+              ok=false ;;
+          esac
+          $ok
+
       - name: dbt debug
-        run: dbt debug --target ci
+        run: |
+          set -o pipefail
+          dbt debug --target ci 2>&1 | tee dbt_debug.log || {
+            # Remonte la cause en annotation (lisible sans ouvrir les logs)
+            msg=$(grep -iE "error|failed|denied|incorrect|mfa|multi-factor|not allowed|250001|390" dbt_debug.log \
+                  | grep -v "^\s*$" | head -5 | tr '\n' ' ' | cut -c1-900)
+            echo "::error title=dbt debug::${msg:-voir le log de l'étape}"
+            exit 1
+          }
 
       # L'artefact est téléchargé dans <repo>/prod-artifacts (= ../prod-artifacts
       # depuis dbt/ : `path` est relatif au workspace, pas au working-directory)
