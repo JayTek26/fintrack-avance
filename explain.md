@@ -26,7 +26,7 @@ Ce document explique chaque action réalisée pendant la session du 20/10/2026 (
 12. [Sprint 6 — Elementary](#12-sprint-6--elementary-us-63)
 13. [Fichiers de configuration du dépôt](#13-fichiers-de-configuration-du-dépôt)
 14. [Simulations exécutées dans Snowflake (hors dépôt)](#14-simulations-exécutées-dans-snowflake-hors-dépôt)
-15. [Git : branche, commits, push](#15-git--branche-commits-push)
+15. [Git, déploiement prod et mise en service de la CI/CD](#15-git-déploiement-prod-et-mise-en-service-de-la-cicd)
 16. [Ce qui n'a pas été fait et pourquoi](#16-ce-qui-na-pas-été-fait-et-pourquoi)
 17. [Index : fichier par fichier](#17-index--fichier-par-fichier)
 
@@ -728,7 +728,7 @@ Testé : `drop_ci_schema` sur `DEV_JAY` est refusé, sur `CI_0` il supprime le s
 
 Deux jobs :
 
-**`slim-ci`**, sur `pull_request` :
+**`slim-ci`**, sur `pull_request` ou lancement manuel (`workflow_dispatch`) :
 1. Checkout, Python 3.11, `pip install dbt-core~=1.10.5 dbt-snowflake~=1.10.0` (1.10.5 minimum pour la syntaxe `arguments:` des tests).
 2. Copie de `profiles.yml.example` dans `dbt/ci_profiles/`, avec `DBT_PROFILES_DIR` qui pointe dessus.
 3. Téléchargement de l'artefact `prod-manifest` (dernier run sur `main`) dans `<repo>/prod-artifacts`.
@@ -737,7 +737,8 @@ Deux jobs :
    - `--defer` : pour les modèles non reconstruits, les `ref()` pointent vers la prod au lieu du schéma CI vide.
 5. Construction :
    ```bash
-   dbt run   --target ci --empty        ...   # crée les tables vides (requis par les tests unitaires)
+   dbt build --target ci --empty --exclude-resource-type test --exclude-resource-type unit_test ...
+                                              # crée les tables vides, snapshot compris (requis par les tests unitaires)
    dbt build --target ci --full-refresh ...   # build réel + tests complets
    ```
    - Les tests unitaires ont besoin que la relation du modèle testé existe : c'est l'usage documenté par dbt.
@@ -757,6 +758,8 @@ DBT_CI_PR_ID=0 dbt run --target ci --empty
 DBT_CI_PR_ID=0 dbt build --target ci --full-refresh
 ```
 Résultat : 148/148 en 1 min 03 s, puis le schéma `CI_0` est supprimé.
+
+Cette validation avait été faite sous **dbt Fusion**. Sous dbt Core, la version utilisée par GitHub, trois incompatibilités sont apparues ensuite, et l'étape `--empty` est passée de `dbt run` à `dbt build`. Une étape de vérification des secrets et un diagnostic de `dbt debug` ont aussi été ajoutés. Détail et état final : **section 15.3 et 15.4**.
 
 ---
 
@@ -1032,20 +1035,97 @@ Mesures :
 
 ---
 
-## 15. Git : branche, commits, push
+## 15. Git, déploiement prod et mise en service de la CI/CD
 
-Dépôt : `fintrack-avance/` (remote `git@github.com:JayTek26/fintrack-avance.git`).
+### 15.1 Historique Git
 
+Dépôt : `fintrack-avance/`, remote `git@github.com:JayTek26/fintrack-avance.git`, branche par défaut `main`.
+
+| Commit | Branche / PR | Contenu |
+|---|---|---|
+| `937550f` | `main` | Initialisation : `MISSION.md` + `.gitignore` (`main` n'avait aucun commit, il fallait une base pour les PR) |
+| `c582cf7` | PR #1 | Sprints 3 à 6 : tout le code et la documentation |
+| `f895632` | PR #2 | « first push » : ajout de `explain.md` (commit de Jay) |
+| `70400e7` | PR #3 | Déploiement prod : script `06_schemas_observabilite.sql`, unit tests désactivés en prod (changements de Jay), détail des sprints 1-2 dans `explain.md` |
+| `e67b03d` | PR #4 | Compatibilité dbt Core 1.10 (voir 15.3) |
+| `592f8d1`, `cada7dd` | PR #5, #6 | Branche `test/ci-verification` : modification de doc pour déclencher la CI, puis diagnostic des secrets |
+| `8b23c2f` | PR #7 | Correction de l'étape `dbt debug` + lancement manuel → **première CI verte** |
+
+- Auteur des commits faits par Claude : `jay <cohortedata@gotolearn.com>`, passé avec `git -c` (aucune identité Git n'était configurée ; la config Git n'a pas été modifiée).
+- Vérifié avant chaque commit : aucun mot de passe ni identifiant de compte Snowflake dans les fichiers. Les identifiants restent dans `~/.snowflake_env`, hors dépôt.
+- Les PR #1 à #6 ont été mergées alors que la CI était rouge. La PR #7 a été mergée après le ✅.
+
+### 15.2 Déploiement prod (réalisé par Jay)
+
+1. **Variables d'environnement prod** : ajoutées à la fin de `~/.snowflake_env` (chargé par `~/.zshrc`, lignes 10-11). Elles reprennent les variables dev par référence, sans recopier de valeur :
+   ```bash
+   export SNOWFLAKE_PROD_USER="$SNOWFLAKE_USER"
+   export SNOWFLAKE_PROD_PASSWORD="$SNOWFLAKE_PASSWORD"
+   export SNOWFLAKE_CI_USER="$SNOWFLAKE_USER"          # pour tester le target ci en local
+   export SNOWFLAKE_CI_PASSWORD="$SNOWFLAKE_PASSWORD"
+   ```
+   L'erreur `environment variable 'SNOWFLAKE_PROD_USER' not found` venait de ce que ces lignes n'existaient pas. Un terminal déjà ouvert doit faire `source ~/.zshrc` pour les voir.
+   Le target `prod` de `~/.dbt/profiles.yml` utilise `password:` (et non la clé privée du `profiles.yml.example`) → `dbt debug --target prod` OK (rôle `FINTRACK_TRANSFORM_ROLE`, `WH_TRANSFORM`, `FINTRACK_PROD`).
+2. **`scripts/snowflake/06_schemas_observabilite.sql`** (en ACCOUNTADMIN) : crée `AUDIT_TEST_FAILURES`, `ELEMENTARY` et `ELEMENTARY__TESTS` dans `FINTRACK_PROD`, et donne les droits à `FINTRACK_TRANSFORM_ROLE`. Ce rôle n'a que `USAGE` sur la base : sans ce script, le build prod échoue (« schema does not exist or not authorized »).
+3. **`dbt_project.yml`** : `unit_tests: +enabled: "{{ (target.name != 'prod') | as_bool }}"`. Les tests unitaires utilisent des données mockées, et ceux des modèles incrémentaux lisent le schéma de `this`, absent au premier déploiement. Ils tournent en dev et en CI.
+4. `dbt build --target prod --full-refresh` exécuté.
+
+**À confirmer :** le backfill de `_loaded_at` sur `FINTRACK_PROD.RAW` (section 1) a-t-il été fait avant ce déploiement ? Sinon, le premier build est complet et juste, mais les runs incrémentaux suivants ne traiteront aucune ligne.
+
+### 15.3 Pourquoi la CI a échoué, et comment elle a été réparée
+
+Les échecs se sont enchaînés : chaque correction a fait apparaître le problème suivant.
+
+| # | Run | Étape en échec | Cause | Correctif |
+|---|---|---|---|---|
+| 1 | push `main` (PR #1 à #3) | `dbt parse --target prod` | `set_query_tag` lançait une requête au **parsing**. dbt Core n'exécute pas de requête à ce moment (`run_query` renvoie `None` → `'None' has no attribute 'table'`). dbt Fusion le tolérait, et le projet n'avait été validé que sous Fusion. | Garde `and execute` dans `set_query_tag` / `unset_query_tag` (`e67b03d`) |
+| 2 | (local, dbt Core) | parsing | dbt Core exige un override explicite `is_incremental` dans les tests unitaires d'un modèle incrémental | `overrides: macros: is_incremental: false` dans `test_stg_transactions.yml` et `unit_fct_virements.yml` (`e67b03d`). Corrige aussi l'échec de ce test en `dbt test` seul sous Fusion. |
+| 3 | (local, dbt Core) | `dbt run --empty` | `dbt run` n'exécute pas les snapshots, et `dim_comptes_scd2` dépend de `snapshot_comptes` | Étape remplacée par `dbt build --empty --exclude-resource-type test --exclude-resource-type unit_test` (`e67b03d`) |
+| 4 | PR #1 à #5 | `dbt debug` | Cause invisible : les logs GitHub ne sont pas lisibles sans authentification | Nouvelle étape « Vérifier les secrets Snowflake » qui émet des annotations `::error::`, elles lisibles publiquement (`cada7dd`) |
+| 5 | PR #6, tentative 1 | Vérifier les secrets | **Les 3 secrets étaient absents** du dépôt | Jay a créé `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_CI_USER`, `SNOWFLAKE_CI_PASSWORD`, `SNOWFLAKE_PROD_USER` dans *Repository secrets* |
+| 6 | PR #6, tentative 2 | `dbt debug` (code 2) | Erreur introduite par le diagnostic lui-même : l'apostrophe de « l'étape » dans `${msg:-… l'étape}` ouvrait une chaîne bash. Le script était invalide, et bash s'arrêtait **avant** de lancer dbt. | Étape réécrite (sortie dans un fichier, test du code retour), testée en local dans les deux cas, syntaxe de toutes les étapes vérifiée avec `bash -n` (`8b23c2f`) |
+| ✅ | **PR #7** | — | — | **Run vert en 55 s**, terminé avant le merge |
+
+Avant de pousser les correctifs 1 à 3, toute la séquence CI a été rejouée en local sous **dbt Core 1.10.23** (venv jetable), sur un schéma `CI_998` vierge avec les sources `FINTRACK_PROD.RAW` : `dbt build --empty` 57 PASS, puis `dbt build --full-refresh` 182 PASS, puis nettoyage du schéma.
+
+### 15.4 Le workflow dans son état final (`.github/workflows/dbt_ci.yml`)
+
+Étapes du job `slim-ci` (durées du run vert de la PR #7) :
+
+| Étape | Durée | Rôle |
+|---|---|---|
+| Installer dbt | 11 s | `dbt-core~=1.10.5`, `dbt-snowflake~=1.10.0` |
+| Récupérer le manifest de prod | 1 s | artefact `prod-manifest` publié par le dernier push sur `main` |
+| dbt deps | 3 s | |
+| Vérifier les secrets Snowflake | 0 s | échoue avec un message explicite si un secret est vide ou si `SNOWFLAKE_ACCOUNT` est une URL ; n'affiche jamais de valeur |
+| dbt debug | 3 s | test de connexion ; en cas d'échec, la cause Snowflake remonte en annotation |
+| dbt build (Slim CI) | 13 s | `state:modified+` + `--defer` (voir ci-dessous) |
+| Cleanup du schéma CI | 7 s | `drop_ci_schema`, même en cas d'échec (`if: always()`) |
+
+Le script de l'étape `dbt debug` :
+```bash
+rc=0
+dbt debug --target ci > dbt_debug.log 2>&1 || rc=$?   # ne pas laisser `bash -e` couper le script
+cat dbt_debug.log
+if [ "$rc" -ne 0 ]; then
+  msg=$(grep -iE "error|fail|denied|incorrect|mfa|multi-factor|not allowed|25000|390" dbt_debug.log \
+        | head -6 | tr '\n' ' ' | tr -s ' ' | cut -c1-1500 || true)
+  echo "::error title=dbt debug (code $rc)::${msg:-aucun message reconnu, voir le log de cette etape}"
+  exit "$rc"
+fi
 ```
-* c582cf7  (feat/sprint3-6-perf-scale)  Sprints 3 à 6 : incrémental, perf, SCD2, CI/CD, contrats, observabilité
-* 937550f  (main)                        Initialisation du dépôt : briefing de mission
-```
-- `main` n'avait aucun commit. Un commit minimal (`MISSION.md` + `.gitignore`) sert de base à la PR.
-- Branche nommée selon la convention du README (`feat/<sprint>-<slug>`) ; elle contient 72 fichiers (5 Mo, dont 4,8 Mo de rapport Elementary).
-- Vérifié avant le commit : aucun mot de passe ni identifiant de compte Snowflake dans les fichiers.
-- Auteur : `jay <cohortedata@gotolearn.com>`, passé avec `git -c` (aucune identité Git n'était configurée ; ta config n'a pas été modifiée).
-- Les deux branches sont poussées. La PR reste à ouvrir depuis https://github.com/JayTek26/fintrack-avance/pull/new/feat/sprint3-6-perf-scale (`gh` n'est pas installé). La description est prête dans le scratchpad de session (`pr_description.md`).
-- **Ce fichier `explain.md` n'est pas encore commité.**
+- GitHub lance chaque étape avec `bash -e -o pipefail`. `|| rc=$?` capture le code retour sans arrêter le script.
+- `::error title=…::message` est une commande GitHub Actions : elle crée une annotation visible sur la PR, et lisible via l'API publique (`check-runs/<id>/annotations`).
+- Codes Snowflake reconnus : `250001` (connexion impossible), `390xxx` (authentification, MFA).
+
+Déclencheurs :
+- `pull_request` vers `main` / `staging` qui touche `dbt/**` ou le workflow → `slim-ci` ;
+- `push` sur `main` → `publish-prod-manifest` (manifest de référence des PR suivantes) ;
+- **`workflow_dispatch`** (Actions → dbt CI → Run workflow) → les deux jobs. En lancement manuel, le schéma s'appelle `CI_run<id>`.
+
+**Limite du run vert :** la PR #7 ne modifiait que le workflow. `state:modified+` n'a donc sélectionné aucun modèle dbt (build de 13 s). La chaîne complète est prouvée (secrets, connexion, manifest de prod, defer, nettoyage), mais pas encore un build réel de modèle en CI. Pour la démonstration complète, il reste à ouvrir une PR qui modifie un modèle (par exemple une colonne ou une description dans `dbt/models/`) et à attendre le ✅.
+
+**Recommandation :** activer *Settings → Branches → Require status checks to pass before merging* (check `slim-ci`) sur `main`, pour qu'une PR rouge ne puisse plus être mergée.
 
 ---
 
@@ -1053,9 +1133,10 @@ Dépôt : `fintrack-avance/` (remote `git@github.com:JayTek26/fintrack-avance.gi
 
 | Point | Raison | Que faire |
 |---|---|---|
-| Backfill `_loaded_at` en **prod** | écriture prod refusée par le mode auto | lancer les UPDATE du PERF_LOG avec FINTRACK_TRANSFORM_ROLE |
-| Premier déploiement prod | même raison ; la CI `--defer` en dépend | `dbt build --target prod --full-refresh` sur un warehouse LARGE |
-| CI verte sur la PR | secrets GitHub absents, prod non déployée | ajouter les 4 secrets (en-tête de `dbt_ci.yml`) |
+| Backfill `_loaded_at` en **prod** | écriture prod refusée par le mode auto | **à confirmer** : lancer les UPDATE du PERF_LOG avec FINTRACK_TRANSFORM_ROLE si ce n'est pas fait |
+| ~~Premier déploiement prod~~ | **fait par Jay le 21/10** (section 15.2) | — |
+| ~~CI verte sur une PR~~ | **fait : PR #7, run vert** (section 15.3) | — |
+| PR de démonstration avec un modèle modifié | le run vert de la PR #7 ne reconstruisait aucun modèle | ouvrir une PR qui touche `dbt/models/` et attendre le ✅ avant de merger |
 | Réglages warehouses | le rôle dev n'a pas les droits `ALTER WAREHOUSE` | commandes dans PERF_LOG, section Warehouses |
 | Profondeur de clustering < 3 | 3,09 au mieux : 288 valeurs de clé pour 32 partitions à l'échelle L | revérifier à l'échelle prod |
 | Captures Query Profile | impossible depuis le terminal | query_id dans PERF_LOG → Snowsight |
