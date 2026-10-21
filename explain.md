@@ -11,6 +11,7 @@ Ce document explique chaque action réalisée pendant la session du 20/10/2026 (
 ## Sommaire
 
 0. [Point de départ : l'état trouvé](#0-point-de-départ--létat-trouvé)
+0 bis. [Sprints 1 et 2 — réalisés avant la session](#0-bis-sprints-1-et-2--réalisés-avant-la-session)
 1. [Bug n°1 : `_loaded_at` NULL et le clone de développement](#1-bug-n1--_loaded_at-null-et-le-clone-de-développement)
 2. [Bug n°2 : la conversion FX à l'envers](#2-bug-n2--la-conversion-fx-à-lenvers)
 3. [Bug n°3 : les tests unitaires ne tournaient pas](#3-bug-n3--les-tests-unitaires-ne-tournaient-pas)
@@ -48,6 +49,152 @@ Les diagnostics ont été faits avec :
 - `dbt show --inline "<sql>"` ;
 - un petit script SnowSQL du scratchpad, qui lance `snowsql` avec les variables `SNOWFLAKE_*` de l'environnement ;
 - la lecture de `dbt/logs/dbt.log` pour reconstituer l'historique des runs.
+
+---
+
+## 0 bis. Sprints 1 et 2 — réalisés avant la session
+
+Ces deux sprints étaient terminés quand la session a commencé. Cette section explique ce qu'ils contiennent et comment ça fonctionne, d'après le code et `docs/PERF_LOG.md`. Les corrections apportées ensuite sont signalées.
+
+### Sprint 1 — Infrastructure et chargement
+
+**Objectif :** préparer Snowflake selon les bonnes pratiques (workloads séparés, coûts maîtrisés) et charger un volume représentatif.
+
+**`scripts/snowflake/01_setup_infrastructure.sql`** — exécuté en ACCOUNTADMIN :
+- **Bases et schémas :** `FINTRACK_PROD` avec un schéma par couche :
+  - `RAW` : brut ;
+  - `STAGING` : nettoyé ;
+  - `MARTS_CORE` / `MARTS_FINANCE` / `MARTS_ANALYTICS` : métier ;
+  - `AUDIT` : journaux ;
+  - `SNAPSHOTS` : historique SCD2.
+  
+  Plus une base séparée `FINTRACK_DEV` pour le développement.
+- **Resource monitor `RM_FINTRACK_MONTHLY`** : 100 crédits/mois.
+  ```sql
+  TRIGGERS ON 75 PERCENT DO NOTIFY            -- alerte
+           ON 90 PERCENT DO SUSPEND           -- suspend quand les requêtes en cours finissent
+           ON 100 PERCENT DO SUSPEND_IMMEDIATE -- coupe tout
+  ```
+- **5 warehouses**, un par type de charge :
+
+  | Warehouse | Taille | Clusters | Auto-suspend | Usage |
+  |---|---|---|---|---|
+  | WH_INGESTION | LARGE (repassé XSMALL depuis) | 1 | 60 s | COPY INTO |
+  | WH_TRANSFORM | MEDIUM | 1 → 3 | 60 s | dbt |
+  | WH_REPORTING | SMALL | 1 → 5, ECONOMY | 300 s | dashboards |
+  | WH_ADHOC | XSMALL | 1 | 60 s | exploration |
+  | WH_DEV | XSMALL | 1 | 60 s | développement |
+
+  - `AUTO_SUSPEND` éteint le warehouse après N secondes d'inactivité : on ne paie que le temps actif.
+  - Le multi-cluster ajoute des copies du warehouse quand des requêtes font la queue (concurrence BI).
+  - REPORTING garde 300 s pour conserver le cache local chaud entre deux clics de dashboard.
+- **5 rôles**, selon une matrice RACI au moindre privilège :
+  - `INGESTION` : écrit dans RAW ;
+  - `TRANSFORM` : lit RAW, écrit dans STAGING, les MARTS, SNAPSHOTS et AUDIT ;
+  - `REPORTING` : lit les MARTS uniquement ;
+  - `ADHOC` : lit toute la prod ;
+  - `DEV` : tous les droits sur FINTRACK_DEV, lecture sur la prod.
+  
+  Les `GRANT ... ON FUTURE TABLES` donnent automatiquement les droits sur les tables créées plus tard.
+
+**`scripts/snowflake/02_ddl_raw_tables.sql`** — tables RAW :
+- `raw_transactions` reproduit un vrai core banking avec environ 80 colonnes : timestamps multiples, montants et devises, marchand, carte, device, AML et fraude, rapprochement, métadonnées.
+- Chaque table a une colonne `_loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()`, l'heure d'arrivée dans RAW.
+- Des clés de clustering sont posées : `(tenant_id, DATE_TRUNC('MONTH', date_transaction))` sur les transactions. Constat du PERF_LOG : un `COPY INTO` échoue sur une table dont la clé contient `DATE_TRUNC`, donc le clustering a été posé après le chargement.
+
+**`scripts/python/generate_data.py`** — génération des données synthétiques :
+- `--scale XS … XXL` choisit le volume (L = 10M transactions, 200k comptes, 12 tenants).
+- Les tenants viennent d'une liste réaliste (`TENANTS_SEED` : BNP-FR, CA-FR, ING-NL, DB-DE, HSBC-UK…).
+- Les transactions sont générées par lots avec numpy (statuts tirés selon des poids : environ 92 % `validee`) et écrites directement en CSV gzip.
+
+**`scripts/snowflake/03_stage_and_copy.sql`** — chargement :
+1. `CREATE FILE FORMAT ff_csv_gz` (CSV gzip, en-tête, NULL si vide).
+2. `CREATE STAGE fintrack_stage` (stage interne).
+3. `PUT file://data/raw/*.csv.gz @fintrack_stage`, côté client SnowSQL.
+4. `COPY INTO raw_<table> FROM @fintrack_stage/... ON_ERROR = 'CONTINUE'` : une ligne invalide est ignorée et comptée au lieu de faire échouer tout le fichier.
+
+**Résultats (PERF_LOG) :**
+- 3,18 Go compressés ;
+- PUT en 2 h 15 : le débit montant du portable, ≈ 3 Mbit/s, est le goulot ;
+- COPY en 2 min 44 (≈ 66 000 lignes/s pour les transactions), 0 erreur ;
+- profondeur de clustering de RAW au 19/10 : 6,86.
+
+**Corrigé pendant la session :** le COPY laissait `_loaded_at` vide (section 1 ci-dessous).
+
+### Sprint 2 — Modélisation core et double écriture
+
+**Objectif :** compléter la modélisation Kimball (dimensions, faits) et gérer les comptes joints.
+
+**`dbt/models/marts/core/dim_categories.sql`** — hiérarchie récursive :
+```sql
+with recursive categories as ( select ... from {{ ref('stg_categories') }} ),
+hierarchie as (
+    -- ANCRAGE : les racines (pas de parent, ou parent inactif donc absent de stg)
+    select c.*, 1 as niveau, c.categorie_id as id_racine,
+           cast(c.nom_categorie as varchar(4000)) as chemin_complet
+    from categories c
+    left join categories p on c.categorie_parent_id = p.categorie_id
+    where p.categorie_id is null
+
+    union all
+
+    -- RÉCURSION : les enfants des nœuds déjà trouvés, un niveau plus bas
+    select c.*, h.niveau + 1, h.id_racine, h.chemin_complet || ' > ' || c.nom_categorie
+    from categories c
+    inner join hierarchie h on c.categorie_parent_id = h.categorie_id
+    where h.niveau < 10      -- garde-fou contre les cycles
+)
+```
+- La requête s'appelle elle-même : chaque passage ajoute les enfants du niveau précédent, jusqu'à ce qu'il n'y en ait plus.
+- Résultat : pour chaque catégorie, son `niveau`, sa racine (`id_racine`) et son chemin lisible (`Loisirs > Restaurant > Fast-food`).
+- `cast(... as varchar(4000))` : sans lui, la colonne prendrait la taille du nom racine et les chemins longs seraient tronqués.
+- Testé par `unit_tests/unit_dim_categories.yml` (3 niveaux).
+
+**`dbt/models/marts/core/fct_virements.sql`** — double écriture :
+```sql
+leg_sortante as ( select virement_id, compte_source_id as compte_id, compte_dest_id as contrepartie_compte_id,
+                         'sortant' as virement_leg, -1 * abs(montant) as montant_signe, ... from virements ),
+leg_entrante as ( select virement_id, compte_dest_id   as compte_id, compte_source_id as contrepartie_compte_id,
+                         'entrant' as virement_leg,      abs(montant) as montant_signe, ... from virements )
+select * from leg_sortante union all select * from leg_entrante
+```
+- Un virement exécuté devient 2 lignes : le débit sur le compte source, le crédit sur le compte destination. C'est le principe comptable de la partie double : le mouvement total vaut zéro.
+- Chaque compte voit donc ses virements comme des mouvements ordinaires, ce qui sert au calcul des soldes dans `mart_solde_journalier`.
+- Modèle incrémental (merge sur la clé `virement_id, virement_leg`).
+- Tests :
+  - `assert_virements_double_ecriture` : exactement 2 lignes par virement, de somme nulle ;
+  - unicité `(virement_id, virement_leg)`.
+- **Modifié pendant la session :** ajout de `montant_eur` / `montant_signe_eur` au taux du jour (section 2) et réécriture du test unitaire (section 3).
+
+**US 2.2 — bridge comptes ↔ titulaires**
+
+1. **Générateur** (`generate_titulaires()` dans `generate_data.py`) :
+   - environ 85 % des comptes ont 1 titulaire, 15 % sont joints (2 ou 3 titulaires) ;
+   - parts égales, le premier titulaire absorbe l'arrondi pour que le total fasse exactement 100 ;
+   - pour environ 5 % des comptes joints, le dernier co-titulaire est **remplacé** en cours de vie : l'ancien lien reçoit une `date_fin`, et un nouveau lien s'ouvre à la même date avec la même part ;
+   - intervalles semi-ouverts `[date_debut, date_fin[` : un jour donné, un seul des deux liens est actif.
+   
+   Fichiers produits : `raw_titulaires` (personnes) et `raw_compte_titulaires` (liens).
+2. **DDL** des deux tables ajoutée au script 02.
+3. **Staging** : `stg_titulaires.sql`, `stg_compte_titulaires.sql`. Tests dans `_staging.yml` : clés, relations vers comptes et titulaires, rôle dans (`PRINCIPAL`, `CO_TITULAIRE`), part entre 0 et 100.
+4. **Bridge** (`dbt/models/marts/core/bridge_comptes_titulaires.sql`) :
+   ```sql
+   select
+       {{ dbt_utils.generate_surrogate_key(['compte_id', 'titulaire_id', 'date_debut']) }} as bridge_key,
+       compte_id, titulaire_id, role_titulaire,
+       round(part_pct / 100.0, 4)     as allocation_factor,   -- 50 % → 0.5
+       date_debut, date_fin,
+       (role_titulaire = 'PRINCIPAL') as is_primary,
+       (date_fin is null)             as is_current
+   from {{ ref('stg_compte_titulaires') }}
+   ```
+   - `allocation_factor` sert à ventiler : la dépense d'une personne = `sum(montant_eur * allocation_factor)` sur ses comptes, en joignant sur la période active.
+   - `bridge_key` : identifiant unique d'un lien sur une période (un même couple compte/titulaire peut revenir plus tard).
+   - Test `assert_bridge_allocation_somme_a_1` : pour chaque compte et chaque date de début de lien, la somme des facteurs des liens actifs ce jour-là doit valoir 1 (tolérance 0,01).
+
+**Livrable du sprint :** `dbt test --exclude tag:todo` vert (dernier build complet du 20/10 au matin : 109 nœuds, 0 erreur, d'après `dbt/logs/dbt.log`).
+
+**Corrigé pendant la session :** les tests unitaires de ce sprint n'étaient pas exécutés (dossier non déclaré à dbt), et celui de `fct_virements` était faux (section 3).
 
 ---
 

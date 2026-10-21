@@ -91,6 +91,15 @@ tests:
   +schema: audit_test_failures
 
 # ============================================
+# Unit tests
+# ============================================
+# Données mockées : rien à valider en prod, et les unit tests des modèles
+# incrémentaux lisent le schéma de `this` (FINTRACK_PROD.STAGING.STG_TRANSACTIONS),
+# absent au premier déploiement → échec du build. Ils tournent en dev et en CI.
+unit_tests:
+  +enabled: "{{ (target.name != 'prod') | as_bool }}"
+
+# ============================================
 # Variables
 # ============================================
 
